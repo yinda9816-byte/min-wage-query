@@ -9,13 +9,14 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const http = require("http");
+const { execSync } = require("child_process");
 
 const SOURCE_URL = "https://m12333.cn/policy/wrib.html";
 const OUTPUT_PATH = path.join(__dirname, "..", "src", "data", "wages.js");
 const LOG_PATH = path.join(__dirname, "..", "src", "data", "update-log.js");
 const MAX_LOGS = 5;
 
-// 省份 -> 地区 映射
 const REGION_MAP = {
   "北京": "华北", "天津": "华北", "河北": "华北", "山西": "华北", "内蒙古": "华北",
   "辽宁": "东北", "吉林": "东北", "黑龙江": "东北",
@@ -28,7 +29,6 @@ const REGION_MAP = {
   "陕西": "西北", "甘肃": "西北", "青海": "西北", "宁夏": "西北", "新疆": "西北",
 };
 
-// 省份 -> 政府网站 映射
 const GOV_URL_MAP = {
   "北京": "https://rsj.beijing.gov.cn/",
   "天津": "https://hrss.tj.gov.cn/",
@@ -63,59 +63,118 @@ const GOV_URL_MAP = {
   "新疆": "https://rst.xinjiang.gov.cn/",
 };
 
-function fetchHTML(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+async function fetchHTML(url, maxRetries) {
+  maxRetries = maxRetries || 3;
+  for (var attempt = 1; attempt <= maxRetries; attempt++) {
+    console.log("📦 抓取尝试 " + attempt + "/" + maxRetries + "…");
+    try {
+      var html = await fetchWithTimeout(url, 15000);
+      if (html && html.length > 1000) {
+        return html;
+      }
+      console.log("⚠️  返回内容过短（" + (html ? html.length : 0) + " 字节）");
+    } catch (err) {
+      console.log("⚠️  抓取失败（尝试 " + attempt + "）: " + err.message);
+    }
+    if (attempt < maxRetries) {
+      console.log("⏳ 等待 3 秒后重试…");
+      await sleep(3000);
+    }
+  }
+  throw new Error("抓取失败，已重试 " + maxRetries + " 次");
+}
+
+function fetchWithTimeout(url, timeoutMs) {
+  return new Promise(function(resolve, reject) {
+    var urlObj = new URL(url);
+    var lib = urlObj.protocol === "https:" ? https : http;
+
+    var options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
+      path: urlObj.pathname + urlObj.search,
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "identity",
+      },
+      timeout: timeoutMs,
+    };
+
+    var req = lib.request(options, function(res) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return resolve(fetchHTML(res.headers.location));
+        var newUrl = res.headers.location.indexOf("http") === 0
+          ? res.headers.location
+          : urlObj.protocol + "//" + urlObj.host + res.headers.location;
+        return resolve(fetchWithTimeout(newUrl, timeoutMs));
       }
       if (res.statusCode !== 200) {
         return reject(new Error("HTTP " + res.statusCode));
       }
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-      res.on("error", reject);
-    }).on("error", reject);
+      var chunks = [];
+      res.on("data", function(chunk) { chunks.push(chunk); });
+      res.on("end", function() {
+        var body = Buffer.concat(chunks).toString("utf8");
+        resolve(body);
+      });
+    });
+
+    req.on("timeout", function() {
+      req.destroy(new Error("请求超时（" + timeoutMs + "ms）"));
+    });
+
+    req.on("error", function(err) {
+      reject(err);
+    });
+
+    req.end();
   });
 }
 
+function sleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
 function parseWageTable(html) {
-  const results = [];
-  const rowRegex = /\|\s*([^|]+?)\s*\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|/g;
+  var results = [];
+  var rowRegex = /\|\s*([^|]+?)\s*\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|/g;
 
-  let match;
-  let id = 1;
+  var match;
+  var id = 1;
   while ((match = rowRegex.exec(html)) !== null) {
-    const province = match[1].trim();
-    const effectiveDate = match[2].trim();
-    const tier1Raw = match[3].trim();
-    const tier2Raw = match[4].trim();
-    const tier3Raw = match[5].trim();
-    const tier4Raw = match[6].trim();
+    var province = match[1].trim();
+    var effectiveDate = match[2].trim();
+    var tier1Raw = match[3].trim();
+    var tier2Raw = match[4].trim();
+    var tier3Raw = match[5].trim();
+    var tier4Raw = match[6].trim();
 
-    if (province === "省市区" || province.includes("执行时间")) continue;
+    if (province === "省市区" || province.indexOf("执行时间") !== -1) continue;
+    if (province.indexOf("---") !== -1 || province.indexOf("===") !== -1) continue;
 
-    const parseWage = (raw) => {
-      const numMatch = raw.match(/(\d{3,5})/);
+    var parseWage = function(raw) {
+      if (!raw) return null;
+      var numMatch = raw.match(/(\d{3,5})/);
       return numMatch ? parseInt(numMatch[1], 10) : null;
     };
 
-    const tier1 = parseWage(tier1Raw);
-    const tier2 = parseWage(tier2Raw);
-    const tier3 = parseWage(tier3Raw);
-    const tier4 = parseWage(tier4Raw);
+    var tier1 = parseWage(tier1Raw);
+    var tier2 = parseWage(tier2Raw);
+    var tier3 = parseWage(tier3Raw);
+    var tier4 = parseWage(tier4Raw);
 
     if (!tier1) continue;
 
     results.push({
-      id,
-      province,
-      effectiveDate,
-      tier1,
-      tier2,
-      tier3,
-      tier4,
+      id: id,
+      province: province,
+      effectiveDate: effectiveDate,
+      tier1: tier1,
+      tier2: tier2,
+      tier3: tier3,
+      tier4: tier4,
       region: REGION_MAP[province] || "其他",
       govUrl: GOV_URL_MAP[province] || "",
     });
@@ -126,20 +185,20 @@ function parseWageTable(html) {
 }
 
 function parsePublishDate(html) {
-  const match = html.match(/发布[：:]\s*(\d{4}-\d{2}-\d{2})/);
+  var match = html.match(/发布[：:]\s*(\d{4}-\d{2}-\d{2})/);
   if (match) return match[1];
   return new Date().toISOString().slice(0, 10);
 }
 
 function generateWagesFile(data, publishDate) {
-  const regions = ["华北", "东北", "华东", "华中", "华南", "西南", "西北"];
+  var regions = ["华北", "东北", "华东", "华中", "华南", "西南", "西北"];
 
-  const dataLines = data.map((item) => {
-    const tier1 = item.tier1;
-    const tier2 = item.tier2 === null ? "null" : item.tier2;
-    const tier3 = item.tier3 === null ? "null" : item.tier3;
-    const tier4 = item.tier4 === null ? "null" : item.tier4;
-    const provincePad = item.province.padEnd(4, "\u3000");
+  var dataLines = data.map(function(item) {
+    var tier1 = item.tier1;
+    var tier2 = item.tier2 === null ? "null" : item.tier2;
+    var tier3 = item.tier3 === null ? "null" : item.tier3;
+    var tier4 = item.tier4 === null ? "null" : item.tier4;
+    var provincePad = item.province.padEnd(4, "\u3000");
     return '  { id: ' + String(item.id).padStart(2, " ") + ',  province: "' + provincePad + '", effectiveDate: "' + item.effectiveDate + '", tier1: ' + tier1 + ', tier2: ' + tier2 + ', tier3: ' + tier3 + ', tier4: ' + tier4 + ', region: "' + item.region + '", govUrl: "' + item.govUrl + '" },';
   }).join("\n");
 
@@ -164,13 +223,13 @@ function generateWagesFile(data, publishDate) {
 }
 
 function writeUpdateLog(status, action, message) {
-  const now = new Date().toISOString();
-  const newLog = { timestamp: now, status, action, message };
+  var now = new Date().toISOString();
+  var newLog = { timestamp: now, status: status, action: action, message: message };
 
-  let logs = [];
+  var logs = [];
   if (fs.existsSync(LOG_PATH)) {
-    const content = fs.readFileSync(LOG_PATH, "utf8");
-    const match = content.match(/export const updateLogs = \[([\s\S]*)\];/);
+    var content = fs.readFileSync(LOG_PATH, "utf8");
+    var match = content.match(/export const updateLogs = \[([\s\S]*)\];/);
     if (match) {
       try {
         logs = JSON.parse("[" + match[1].trim().replace(/,\s*$/, "") + "]");
@@ -183,14 +242,19 @@ function writeUpdateLog(status, action, message) {
   logs.unshift(newLog);
   logs = logs.slice(0, MAX_LOGS);
 
-  const logLines = logs.map((log) =>
-    '  { timestamp: "' + log.timestamp + '", status: "' + log.status + '", action: "' + log.action + '", message: "' + log.message + '" },'
-  ).join("\n");
+  var logLines = logs.map(function(log) {
+    return '  { timestamp: "' + log.timestamp + '", status: "' + log.status + '", action: "' + log.action + '", message: "' + log.message + '" },';
+  }).join("\n");
 
-  const fileContent = '// 数据更新日志（由 GitHub Actions 自动写入，仅保留最近 ' + MAX_LOGS + ' 条）\n' +
+  var fileContent = '// 数据更新日志（由 GitHub Actions 自动写入，仅保留最近 ' + MAX_LOGS + ' 条）\n' +
     '// status: "success" | "failed"\n' +
     '// action: "updated" | "no-change" | "error"\n\n' +
     'export const updateLogs = [\n' + logLines + '\n];\n';
+
+  var logDir = path.dirname(LOG_PATH);
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
 
   fs.writeFileSync(LOG_PATH, fileContent, "utf8");
   console.log("📝 已写入更新日志：" + status + " / " + action);
@@ -199,32 +263,54 @@ function writeUpdateLog(status, action, message) {
 async function main() {
   try {
     console.log("📦 正在抓取数据源…");
-    const html = await fetchHTML(SOURCE_URL);
+
+    var html;
+    try {
+      html = await fetchHTML(SOURCE_URL, 3);
+    } catch (nodeErr) {
+      console.log("⚠️  Node.js 抓取失败: " + nodeErr.message);
+      console.log("🔄 尝试使用 curl 作为备选方案…");
+      try {
+        html = execSync(
+          'curl -sL --max-time 20 -A "Mozilla/5.0" "' + SOURCE_URL + '"',
+          { encoding: "utf8", timeout: 25000 }
+        );
+      } catch (curlErr) {
+        throw new Error("Node.js: " + nodeErr.message + "; curl: " + curlErr.message);
+      }
+    }
+
     console.log("✅ 成功获取页面内容（" + html.length + " 字节）");
 
+    if (process.env.DEBUG === "true") {
+      console.log("页面前500字符:", html.substring(0, 500));
+    }
+
     console.log("📊 正在解析工资数据…");
-    const wageData = parseWageTable(html);
+    var wageData = parseWageTable(html);
 
     if (wageData.length === 0) {
-      console.error("❌ 未能解析到任何工资数据，请检查页面结构是否变更");
-      writeUpdateLog("failed", "error", "未能解析到任何工资数据，页面结构可能已变更");
+      var errorMsg = "未能解析到任何工资数据，页面内容长度 " + html.length + "，可能页面结构已变更";
+      console.error("❌ " + errorMsg);
+      console.error("页面内容片段:", html.substring(0, 1000));
+      writeUpdateLog("failed", "error", errorMsg);
       process.exit(1);
     }
 
     console.log("✅ 成功解析 " + wageData.length + " 条记录");
 
-    const publishDate = parsePublishDate(html);
+    var publishDate = parsePublishDate(html);
     console.log("📅 发布日期：" + publishDate);
 
-    const fileContent = generateWagesFile(wageData, publishDate);
+    var fileContent = generateWagesFile(wageData, publishDate);
 
-    const existingContent = fs.existsSync(OUTPUT_PATH)
+    var existingContent = fs.existsSync(OUTPUT_PATH)
       ? fs.readFileSync(OUTPUT_PATH, "utf8")
       : "";
 
-    if (existingContent.includes('publishDate: "' + publishDate + '"') && existingContent.length > 0) {
-      const existingDataMatch = existingContent.match(/export const wageData = \[([\s\S]*?)\];/);
-      const newDataMatch = fileContent.match(/export const wageData = \[([\s\S]*?)\];/);
+    if (existingContent.indexOf('publishDate: "' + publishDate + '"') !== -1 && existingContent.length > 0) {
+      var existingDataMatch = existingContent.match(/export const wageData = \[([\s\S]*?)\];/);
+      var newDataMatch = fileContent.match(/export const wageData = \[([\s\S]*?)\];/);
       if (existingDataMatch && newDataMatch && existingDataMatch[1].trim() === newDataMatch[1].trim()) {
         console.log("ℹ️  数据未发生变化，跳过更新");
         writeUpdateLog("success", "no-change", "数据未发生变化，发布日期 " + publishDate + "，共 " + wageData.length + " 条记录");
@@ -232,8 +318,7 @@ async function main() {
       }
     }
 
-    // 确保 src/data 目录存在
-    const dataDir = path.dirname(OUTPUT_PATH);
+    var dataDir = path.dirname(OUTPUT_PATH);
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
