@@ -88,20 +88,26 @@ async function fetchHTMLWithPuppeteer(url) {
       console.log("等待表格内容超时，继续尝试");
     }
 
+    var innerText = await page.evaluate(function() { return document.body.innerText; });
     var html = await page.content();
-    console.log("获取页面内容（" + html.length + " 字节）");
-    return html;
+    console.log("获取页面内容（HTML " + html.length + " 字节，文本 " + innerText.length + " 字节）");
+
+    return { text: innerText, html: html };
   } finally {
     await browser.close();
   }
 }
 
-function parseWageTable(html) {
+function parseWageTable(data) {
   var results = [];
+  var text = data.text || "";
+  var html = data.html || "";
+
   var rowRegex = /\|\s*([^|]+?)\s*\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|/g;
   var match;
   var id = 1;
-  while ((match = rowRegex.exec(html)) !== null) {
+
+  while ((match = rowRegex.exec(text)) !== null) {
     var province = match[1].trim();
     var effectiveDate = match[2].trim();
     var tier1Raw = match[3].trim();
@@ -133,11 +139,68 @@ function parseWageTable(html) {
     });
     id++;
   }
+
+  if (results.length > 0) {
+    console.log("通过 Markdown 表格解析成功");
+    return results;
+  }
+
+  console.log("Markdown 表格未匹配，尝试解析 HTML td 标签...");
+  var tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
+  var cells = [];
+  var tdMatch;
+  while ((tdMatch = tdRegex.exec(html)) !== null) {
+    var cellText = tdMatch[1].replace(/<[^>]+>/g, "").trim();
+    cells.push(cellText);
+  }
+
+  var colsPerRow = 7;
+  for (var i = 0; i < cells.length; i += colsPerRow) {
+    if (i + colsPerRow > cells.length) break;
+
+    province = cells[i].trim();
+    effectiveDate = cells[i + 1] ? cells[i + 1].trim() : "";
+    tier1Raw = cells[i + 2] ? cells[i + 2].trim() : "";
+    tier2Raw = cells[i + 3] ? cells[i + 3].trim() : "";
+    tier3Raw = cells[i + 4] ? cells[i + 4].trim() : "";
+    tier4Raw = cells[i + 5] ? cells[i + 5].trim() : "";
+
+    if (province === "省市区" || province.indexOf("执行时间") !== -1) continue;
+
+    parseWage = function(raw) {
+      if (!raw) return null;
+      var numMatch = raw.match(/(\d{3,5})/);
+      return numMatch ? parseInt(numMatch[1], 10) : null;
+    };
+
+    tier1 = parseWage(tier1Raw);
+    tier2 = parseWage(tier2Raw);
+    tier3 = parseWage(tier3Raw);
+    tier4 = parseWage(tier4Raw);
+
+    if (!tier1) continue;
+
+    results.push({
+      id: id, province: province, effectiveDate: effectiveDate,
+      tier1: tier1, tier2: tier2, tier3: tier3, tier4: tier4,
+      region: REGION_MAP[province] || "其他",
+      govUrl: GOV_URL_MAP[province] || "",
+    });
+    id++;
+  }
+
+  if (results.length > 0) {
+    console.log("通过 HTML td 标签解析成功");
+  }
+
   return results;
 }
 
-function parsePublishDate(html) {
-  var match = html.match(/发布[：:]\s*(\d{4}-\d{2}-\d{2})/);
+function parsePublishDate(data) {
+  var text = data.text || "";
+  var html = data.html || "";
+  var match = text.match(/发布[：:]\s*(\d{4}-\d{2}-\d{2})/);
+  if (!match) match = html.match(/发布[：:]\s*(\d{4}-\d{2}-\d{2})/);
   if (match) return match[1];
   return new Date().toISOString().slice(0, 10);
 }
@@ -181,24 +244,25 @@ function writeUpdateLog(status, action, message) {
 
 async function main() {
   try {
-    var html = await fetchHTMLWithPuppeteer(SOURCE_URL);
-    if (!html || html.length < 1000) {
-      throw new Error("页面内容过短（" + (html ? html.length : 0) + " 字节）");
+    var pageData = await fetchHTMLWithPuppeteer(SOURCE_URL);
+
+    if (!pageData.html || pageData.html.length < 1000) {
+      throw new Error("页面内容过短");
     }
 
     console.log("解析工资数据...");
-    var wageData = parseWageTable(html);
+    var wageData = parseWageTable(pageData);
 
     if (wageData.length === 0) {
-      var msg = "未能解析到工资数据，页面长度 " + html.length;
+      var msg = "未能解析到工资数据，页面长度 " + pageData.html.length;
       console.error("错误: " + msg);
-      console.error("页面片段:", html.substring(0, 1000));
+      console.error("文本内容片段:", (pageData.text || "").substring(0, 1000));
       writeUpdateLog("failed", "error", msg);
       process.exit(1);
     }
 
     console.log("成功解析 " + wageData.length + " 条记录");
-    var publishDate = parsePublishDate(html);
+    var publishDate = parsePublishDate(pageData);
     console.log("发布日期: " + publishDate);
 
     var fileContent = generateWagesFile(wageData, publishDate);
