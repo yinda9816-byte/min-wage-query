@@ -1,11 +1,3 @@
-/**
- * 最低工资数据抓取脚本（Puppeteer 版）
- * 从 https://m12333.cn/policy/wrib.html 抓取全国各省市最低工资标准
- * 数据源有 JS 反爬机制（akeyjs），需要用 Puppeteer 执行 JS 后才能获取真实内容
- *
- * 用法: node scripts/fetch-wages.cjs
- */
-
 var fs = require("fs");
 var path = require("path");
 
@@ -69,10 +61,10 @@ async function fetchHTMLWithPuppeteer(url) {
   try {
     puppeteer = require("puppeteer");
   } catch (e) {
-    throw new Error("puppeteer 模块未安装，请运行 npm install puppeteer");
+    throw new Error("puppeteer 模块未安装");
   }
 
-  console.log("🌐 启动 Puppeteer 浏览器…");
+  console.log("启动 Puppeteer...");
   var browser = await puppeteer.launch({
     headless: "new",
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
@@ -80,27 +72,24 @@ async function fetchHTMLWithPuppeteer(url) {
 
   try {
     var page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
-    console.log("📦 正在访问页面（等待 JS 反爬验证通过）…");
+    console.log("访问页面...");
     await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
-
     await sleep(3000);
 
     try {
       await page.waitForFunction(
-        "document.body.innerText.indexOf('省市区') !== -1 || document.body.innerText.indexOf('北京') !== -1",
+        "document.body.innerText.indexOf('北京') !== -1",
         { timeout: 10000 }
       );
-      console.log("✅ 检测到表格内容已加载");
+      console.log("检测到表格内容已加载");
     } catch (e) {
-      console.log("⚠️  等待表格内容超时，继续尝试获取…");
+      console.log("等待表格内容超时，继续尝试");
     }
 
     var html = await page.content();
-    console.log("✅ 成功获取页面内容（" + html.length + " 字节）");
+    console.log("获取页面内容（" + html.length + " 字节）");
     return html;
   } finally {
     await browser.close();
@@ -110,7 +99,6 @@ async function fetchHTMLWithPuppeteer(url) {
 function parseWageTable(html) {
   var results = [];
   var rowRegex = /\|\s*([^|]+?)\s*\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|/g;
-
   var match;
   var id = 1;
   while ((match = rowRegex.exec(html)) !== null) {
@@ -138,19 +126,13 @@ function parseWageTable(html) {
     if (!tier1) continue;
 
     results.push({
-      id: id,
-      province: province,
-      effectiveDate: effectiveDate,
-      tier1: tier1,
-      tier2: tier2,
-      tier3: tier3,
-      tier4: tier4,
+      id: id, province: province, effectiveDate: effectiveDate,
+      tier1: tier1, tier2: tier2, tier3: tier3, tier4: tier4,
       region: REGION_MAP[province] || "其他",
       govUrl: GOV_URL_MAP[province] || "",
     });
     id++;
   }
-
   return results;
 }
 
@@ -162,125 +144,84 @@ function parsePublishDate(html) {
 
 function generateWagesFile(data, publishDate) {
   var regions = ["华北", "东北", "华东", "华中", "华南", "西南", "西北"];
-
   var dataLines = data.map(function(item) {
-    var tier1 = item.tier1;
-    var tier2 = item.tier2 === null ? "null" : item.tier2;
-    var tier3 = item.tier3 === null ? "null" : item.tier3;
-    var tier4 = item.tier4 === null ? "null" : item.tier4;
-    var provincePad = item.province.padEnd(4, "\u3000");
-    return '  { id: ' + String(item.id).padStart(2, " ") + ',  province: "' + provincePad + '", effectiveDate: "' + item.effectiveDate + '", tier1: ' + tier1 + ', tier2: ' + tier2 + ', tier3: ' + tier3 + ', tier4: ' + tier4 + ', region: "' + item.region + '", govUrl: "' + item.govUrl + '" },';
+    var t1 = item.tier1;
+    var t2 = item.tier2 === null ? "null" : item.tier2;
+    var t3 = item.tier3 === null ? "null" : item.tier3;
+    var t4 = item.tier4 === null ? "null" : item.tier4;
+    var pp = item.province.padEnd(4, "\u3000");
+    return '  { id: ' + String(item.id).padStart(2, " ") + ',  province: "' + pp + '", effectiveDate: "' + item.effectiveDate + '", tier1: ' + t1 + ', tier2: ' + t2 + ', tier3: ' + t3 + ', tier4: ' + t4 + ', region: "' + item.region + '", govUrl: "' + item.govUrl + '" },';
   }).join("\n");
 
-  return '// 全国各省市最低工资标准数据\n' +
-    '// 数据来源：https://m12333.cn/policy/wrib.html\n' +
-    '// 更新频率：每天上午9点\n' +
-    '// 此文件由 GitHub Actions 自动生成，请勿手动编辑\n' +
-    '// 最后更新：' + new Date().toISOString() + '\n\n' +
-    'export const wageData = [\n' + dataLines + '\n];\n\n' +
-    'export const regions = ' + JSON.stringify(regions) + ';\n\n' +
-    'export const dataUpdateInfo = {\n' +
-    '  publishDate: "' + publishDate + '",\n' +
-    '  updateFrequency: "每日上午 09:00",\n' +
-    '  sourceName: "人社通（m12333.cn）",\n' +
-    '  sourceUrl: "https://m12333.cn/policy/wrib.html",\n' +
-    '};\n\n' +
-    'export const notes = [\n' +
-    '  "本表未包含我国港、澳、台地区数据。",\n' +
-    '  "用人单位执行最低工资标准时，应剔除：加班工资；中班、夜班、高温、低温、井下、有毒有害等特殊津贴；国家规定的劳动者福利待遇等。",\n' +
-    '  "本站非政府官网，所收藏的信息仅供参考，请以各地政府官方公布为准。",\n' +
-    '];\n';
+  return '// 全国各省市最低工资标准数据\n// 数据来源：https://m12333.cn/policy/wrib.html\n// 更新频率：每天上午9点\n// 此文件由 GitHub Actions 自动生成，请勿手动编辑\n// 最后更新：' + new Date().toISOString() + '\n\nexport const wageData = [\n' + dataLines + '\n];\n\nexport const regions = ' + JSON.stringify(regions) + ';\n\nexport const dataUpdateInfo = {\n  publishDate: "' + publishDate + '",\n  updateFrequency: "每日上午 09:00",\n  sourceName: "人社通（m12333.cn）",\n  sourceUrl: "https://m12333.cn/policy/wrib.html",\n};\n\nexport const notes = [\n  "本表未包含我国港、澳、台地区数据。",\n  "用人单位执行最低工资标准时，应剔除：加班工资；中班、夜班、高温、低温、井下、有毒有害等特殊津贴；国家规定的劳动者福利待遇等。",\n  "本站非政府官网，所收藏的信息仅供参考，请以各地政府官方公布为准。",\n];\n';
 }
 
 function writeUpdateLog(status, action, message) {
   var now = new Date().toISOString();
   var newLog = { timestamp: now, status: status, action: action, message: message };
-
   var logs = [];
   if (fs.existsSync(LOG_PATH)) {
     var content = fs.readFileSync(LOG_PATH, "utf8");
     var match = content.match(/export const updateLogs = \[([\s\S]*)\];/);
     if (match) {
-      try {
-        logs = JSON.parse("[" + match[1].trim().replace(/,\s*$/, "") + "]");
-      } catch (e) {
-        logs = [];
-      }
+      try { logs = JSON.parse("[" + match[1].trim().replace(/,\s*$/, "") + "]"); } catch (e) { logs = []; }
     }
   }
-
   logs.unshift(newLog);
   logs = logs.slice(0, MAX_LOGS);
-
   var logLines = logs.map(function(log) {
     return '  { timestamp: "' + log.timestamp + '", status: "' + log.status + '", action: "' + log.action + '", message: "' + log.message + '" },';
   }).join("\n");
-
-  var fileContent = '// 数据更新日志（由 GitHub Actions 自动写入，仅保留最近 ' + MAX_LOGS + ' 条）\n' +
-    '// status: "success" | "failed"\n' +
-    '// action: "updated" | "no-change" | "error"\n\n' +
-    'export const updateLogs = [\n' + logLines + '\n];\n';
-
+  var fileContent = '// 数据更新日志（由 GitHub Actions 自动写入，仅保留最近 ' + MAX_LOGS + ' 条）\n// status: "success" | "failed"\n// action: "updated" | "no-change" | "error"\n\nexport const updateLogs = [\n' + logLines + '\n];\n';
   var logDir = path.dirname(LOG_PATH);
-  if (!fs.existsSync(logDir)) {
-    fs.mkdirSync(logDir, { recursive: true });
-  }
-
+  if (!fs.existsSync(logDir)) { fs.mkdirSync(logDir, { recursive: true }); }
   fs.writeFileSync(LOG_PATH, fileContent, "utf8");
-  console.log("📝 已写入更新日志：" + status + " / " + action);
+  console.log("已写入更新日志：" + status + " / " + action);
 }
 
 async function main() {
   try {
     var html = await fetchHTMLWithPuppeteer(SOURCE_URL);
-
     if (!html || html.length < 1000) {
-      throw new Error("获取的页面内容过短（" + (html ? html.length : 0) + " 字节），可能反爬验证未通过");
+      throw new Error("页面内容过短（" + (html ? html.length : 0) + " 字节）");
     }
 
-    console.log("📊 正在解析工资数据…");
+    console.log("解析工资数据...");
     var wageData = parseWageTable(html);
 
     if (wageData.length === 0) {
-      var errorMsg = "未能解析到任何工资数据，页面内容长度 " + html.length + "，可能页面结构已变更";
-      console.error("❌ " + errorMsg);
-      console.error("页面内容片段:", html.substring(0, 1000));
-      writeUpdateLog("failed", "error", errorMsg);
+      var msg = "未能解析到工资数据，页面长度 " + html.length;
+      console.error("错误: " + msg);
+      console.error("页面片段:", html.substring(0, 1000));
+      writeUpdateLog("failed", "error", msg);
       process.exit(1);
     }
 
-    console.log("✅ 成功解析 " + wageData.length + " 条记录");
-
+    console.log("成功解析 " + wageData.length + " 条记录");
     var publishDate = parsePublishDate(html);
-    console.log("📅 发布日期：" + publishDate);
+    console.log("发布日期: " + publishDate);
 
     var fileContent = generateWagesFile(wageData, publishDate);
-
-    var existingContent = fs.existsSync(OUTPUT_PATH)
-      ? fs.readFileSync(OUTPUT_PATH, "utf8")
-      : "";
+    var existingContent = fs.existsSync(OUTPUT_PATH) ? fs.readFileSync(OUTPUT_PATH, "utf8") : "";
 
     if (existingContent.indexOf('publishDate: "' + publishDate + '"') !== -1 && existingContent.length > 0) {
-      var existingDataMatch = existingContent.match(/export const wageData = \[([\s\S]*?)\];/);
-      var newDataMatch = fileContent.match(/export const wageData = \[([\s\S]*?)\];/);
-      if (existingDataMatch && newDataMatch && existingDataMatch[1].trim() === newDataMatch[1].trim()) {
-        console.log("ℹ️  数据未发生变化，跳过更新");
-        writeUpdateLog("success", "no-change", "数据未发生变化，发布日期 " + publishDate + "，共 " + wageData.length + " 条记录");
+      var em = existingContent.match(/export const wageData = \[([\s\S]*?)\];/);
+      var nm = fileContent.match(/export const wageData = \[([\s\S]*?)\];/);
+      if (em && nm && em[1].trim() === nm[1].trim()) {
+        console.log("数据未变化，跳过更新");
+        writeUpdateLog("success", "no-change", "数据未变化，发布日期 " + publishDate + "，共 " + wageData.length + " 条记录");
         return;
       }
     }
 
     var dataDir = path.dirname(OUTPUT_PATH);
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-
+    if (!fs.existsSync(dataDir)) { fs.mkdirSync(dataDir, { recursive: true }); }
     fs.writeFileSync(OUTPUT_PATH, fileContent, "utf8");
-    console.log("✅ 已写入文件：" + OUTPUT_PATH);
-    console.log("🎉 数据更新完成！");
-    writeUpdateLog("success", "updated", "数据更新成功，共解析 " + wageData.length + " 条记录，发布日期 " + publishDate);
+    console.log("已写入文件: " + OUTPUT_PATH);
+    console.log("数据更新完成！");
+    writeUpdateLog("success", "updated", "数据更新成功，共 " + wageData.length + " 条记录，发布日期 " + publishDate);
   } catch (error) {
-    console.error("❌ 抓取失败：", error.message);
+    console.error("抓取失败: " + error.message);
     writeUpdateLog("failed", "error", "抓取失败：" + error.message);
     process.exit(1);
   }
