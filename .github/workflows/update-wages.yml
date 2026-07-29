@@ -1,0 +1,54 @@
+name: 每日更新最低工资数据
+
+on:
+  schedule:
+    # 每天北京时间 09:00 执行（UTC 01:00）
+    - cron: "0 1 * * *"
+  workflow_dispatch: # 支持手动触发
+
+permissions:
+  contents: write # 允许提交代码
+
+jobs:
+  update-wages:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 抓取最新最低工资数据
+        id: fetch
+        run: |
+          node scripts/fetch-wages.cjs
+          echo "updated=true" >> $GITHUB_OUTPUT
+
+      - name: 检查文件是否有变更
+        id: check
+        run: |
+          if git diff --quiet src/data/wages.js src/data/update-log.js; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  数据无变化，跳过提交"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "📊 检测到数据或日志变更"
+          fi
+
+      - name: 提交更新
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/data/wages.js src/data/update-log.js
+          git commit -m "chore(data): 自动更新最低工资数据 $(date -u -d '+8 hours' '+%Y-%m-%d %H:%M')"
+          git push
+
+      - name: 触发部署
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          echo "🚀 数据已更新并提交，将触发自动部署"
