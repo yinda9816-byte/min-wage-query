@@ -1,23 +1,20 @@
 /**
- * 最低工资数据抓取脚本
+ * 最低工资数据抓取脚本（Puppeteer 版）
  * 从 https://m12333.cn/policy/wrib.html 抓取全国各省市最低工资标准
- * 由 GitHub Actions 每日 09:00（UTC+8，即 UTC 01:00）自动执行
+ * 数据源有 JS 反爬机制（akeyjs），需要用 Puppeteer 执行 JS 后才能获取真实内容
  *
  * 用法: node scripts/fetch-wages.cjs
  */
 
-const fs = require("fs");
-const path = require("path");
-const https = require("https");
-const http = require("http");
-const { execSync } = require("child_process");
+var fs = require("fs");
+var path = require("path");
 
-const SOURCE_URL = "https://m12333.cn/policy/wrib.html";
-const OUTPUT_PATH = path.join(__dirname, "..", "src", "data", "wages.js");
-const LOG_PATH = path.join(__dirname, "..", "src", "data", "update-log.js");
-const MAX_LOGS = 5;
+var SOURCE_URL = "https://m12333.cn/policy/wrib.html";
+var OUTPUT_PATH = path.join(__dirname, "..", "src", "data", "wages.js");
+var LOG_PATH = path.join(__dirname, "..", "src", "data", "update-log.js");
+var MAX_LOGS = 5;
 
-const REGION_MAP = {
+var REGION_MAP = {
   "北京": "华北", "天津": "华北", "河北": "华北", "山西": "华北", "内蒙古": "华北",
   "辽宁": "东北", "吉林": "东北", "黑龙江": "东北",
   "上海": "华东", "江苏": "华东", "浙江": "华东", "安徽": "华东",
@@ -29,7 +26,7 @@ const REGION_MAP = {
   "陕西": "西北", "甘肃": "西北", "青海": "西北", "宁夏": "西北", "新疆": "西北",
 };
 
-const GOV_URL_MAP = {
+var GOV_URL_MAP = {
   "北京": "https://rsj.beijing.gov.cn/",
   "天津": "https://hrss.tj.gov.cn/",
   "河北": "https://rst.hebei.gov.cn/",
@@ -63,78 +60,51 @@ const GOV_URL_MAP = {
   "新疆": "https://rst.xinjiang.gov.cn/",
 };
 
-async function fetchHTML(url, maxRetries) {
-  maxRetries = maxRetries || 3;
-  for (var attempt = 1; attempt <= maxRetries; attempt++) {
-    console.log("📦 抓取尝试 " + attempt + "/" + maxRetries + "…");
-    try {
-      var html = await fetchWithTimeout(url, 15000);
-      if (html && html.length > 1000) {
-        return html;
-      }
-      console.log("⚠️  返回内容过短（" + (html ? html.length : 0) + " 字节）");
-    } catch (err) {
-      console.log("⚠️  抓取失败（尝试 " + attempt + "）: " + err.message);
-    }
-    if (attempt < maxRetries) {
-      console.log("⏳ 等待 3 秒后重试…");
-      await sleep(3000);
-    }
-  }
-  throw new Error("抓取失败，已重试 " + maxRetries + " 次");
-}
-
-function fetchWithTimeout(url, timeoutMs) {
-  return new Promise(function(resolve, reject) {
-    var urlObj = new URL(url);
-    var lib = urlObj.protocol === "https:" ? https : http;
-
-    var options = {
-      hostname: urlObj.hostname,
-      port: urlObj.port || (urlObj.protocol === "https:" ? 443 : 80),
-      path: urlObj.pathname + urlObj.search,
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "identity",
-      },
-      timeout: timeoutMs,
-    };
-
-    var req = lib.request(options, function(res) {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        var newUrl = res.headers.location.indexOf("http") === 0
-          ? res.headers.location
-          : urlObj.protocol + "//" + urlObj.host + res.headers.location;
-        return resolve(fetchWithTimeout(newUrl, timeoutMs));
-      }
-      if (res.statusCode !== 200) {
-        return reject(new Error("HTTP " + res.statusCode));
-      }
-      var chunks = [];
-      res.on("data", function(chunk) { chunks.push(chunk); });
-      res.on("end", function() {
-        var body = Buffer.concat(chunks).toString("utf8");
-        resolve(body);
-      });
-    });
-
-    req.on("timeout", function() {
-      req.destroy(new Error("请求超时（" + timeoutMs + "ms）"));
-    });
-
-    req.on("error", function(err) {
-      reject(err);
-    });
-
-    req.end();
-  });
-}
-
 function sleep(ms) {
   return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+async function fetchHTMLWithPuppeteer(url) {
+  var puppeteer;
+  try {
+    puppeteer = require("puppeteer");
+  } catch (e) {
+    throw new Error("puppeteer 模块未安装，请运行 npm install puppeteer");
+  }
+
+  console.log("🌐 启动 Puppeteer 浏览器…");
+  var browser = await puppeteer.launch({
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
+
+  try {
+    var page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    );
+
+    console.log("📦 正在访问页面（等待 JS 反爬验证通过）…");
+    await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
+
+    await sleep(3000);
+
+    try {
+      await page.waitForFunction(
+        "document.body.innerText.indexOf('省市区') !== -1 || document.body.innerText.indexOf('北京') !== -1",
+        { timeout: 10000 }
+      );
+      console.log("✅ 检测到表格内容已加载");
+    } catch (e) {
+      console.log("⚠️  等待表格内容超时，继续尝试获取…");
+    }
+
+    var html = await page.content();
+    console.log("✅ 成功获取页面内容（" + html.length + " 字节）");
+    return html;
+  } finally {
+    await browser.close();
+  }
 }
 
 function parseWageTable(html) {
@@ -262,28 +232,10 @@ function writeUpdateLog(status, action, message) {
 
 async function main() {
   try {
-    console.log("📦 正在抓取数据源…");
+    var html = await fetchHTMLWithPuppeteer(SOURCE_URL);
 
-    var html;
-    try {
-      html = await fetchHTML(SOURCE_URL, 3);
-    } catch (nodeErr) {
-      console.log("⚠️  Node.js 抓取失败: " + nodeErr.message);
-      console.log("🔄 尝试使用 curl 作为备选方案…");
-      try {
-        html = execSync(
-          'curl -sL --max-time 20 -A "Mozilla/5.0" "' + SOURCE_URL + '"',
-          { encoding: "utf8", timeout: 25000 }
-        );
-      } catch (curlErr) {
-        throw new Error("Node.js: " + nodeErr.message + "; curl: " + curlErr.message);
-      }
-    }
-
-    console.log("✅ 成功获取页面内容（" + html.length + " 字节）");
-
-    if (process.env.DEBUG === "true") {
-      console.log("页面前500字符:", html.substring(0, 500));
+    if (!html || html.length < 1000) {
+      throw new Error("获取的页面内容过短（" + (html ? html.length : 0) + " 字节），可能反爬验证未通过");
     }
 
     console.log("📊 正在解析工资数据…");
